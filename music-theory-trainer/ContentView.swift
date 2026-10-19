@@ -7,7 +7,7 @@ private enum PracticeMode: String, CaseIterable {
     case guess = "Guess"
 }
 
-private struct RootNote: Identifiable, Equatable {
+struct RootNote: Identifiable, Equatable {
     let pitchClass: Int
     let name: String
 
@@ -31,7 +31,7 @@ private struct RootNote: Identifiable, Equatable {
     }
 }
 
-private struct IntervalInfo: Identifiable {
+struct IntervalInfo: Identifiable {
     let semitones: Int
     let symbol: String
     let name: String
@@ -70,10 +70,13 @@ struct ContentView: View {
     @State private var mode: PracticeMode = .explore
     @State private var selectedInterval = IntervalInfo.semitones(7)
     @State private var selectedRoot = RootNote.all[0]
+    @State private var gamePhase: GamePhase = .setup
+    @State private var roundLength = 10
     @State private var challenge: IntervalInfo?
     @State private var answer: IntervalInfo?
-    @State private var correctCount = 0
-    @State private var roundCount = 0
+    @State private var attempts: [GuessAttempt] = []
+    @State private var playCount = 0
+    @State private var advanceTask: Task<Void, Never>?
     @State private var isFeelingExpanded = true
     @State private var isAddTagPresented = false
     @State private var newFeelingTag = ""
@@ -93,37 +96,68 @@ struct ContentView: View {
                 )
                 .ignoresSafeArea()
 
-                ScrollView {
-                    VStack(spacing: 28) {
-                        header
+                let horizontalPadding: CGFloat = geometry.size.width < 520 ? 16 : 28
 
-                        if geometry.size.width >= 880 {
-                            HStack(alignment: .center, spacing: 24) {
-                                wheelCard
-                                    .frame(width: min(geometry.size.width * 0.55, 620))
-                                practicePanel
-                                    .frame(width: min(geometry.size.width * 0.33, 370))
-                            }
-                            .frame(maxWidth: 1180)
-                        } else {
-                            VStack(spacing: 20) {
-                                wheelCard
-                                    .frame(maxWidth: 560)
-                                practicePanel
-                                    .frame(maxWidth: 560)
-                            }
-                        }
-
+                VStack(spacing: 0) {
+                    if isGameActive {
+                        gameHUD
+                            .padding(.horizontal, horizontalPadding)
+                            .padding(.top, 20)
+                            .transition(.move(edge: .top).combined(with: .opacity))
                     }
-                    .padding(.horizontal, geometry.size.width < 520 ? 16 : 28)
-                    .padding(.top, 20)
-                    .padding(.bottom, 34)
-                    .frame(maxWidth: .infinity)
+
+                    GeometryReader { scrollGeometry in
+                        // During a round the wheel grows to fill the space left by the panel.
+                        let gameSide = max(280, min(scrollGeometry.size.width - horizontalPadding * 2, scrollGeometry.size.height - 40, 760))
+
+                        ScrollView {
+                            VStack(spacing: 28) {
+                                if !isGameActive {
+                                    header
+                                }
+
+                                if geometry.size.width >= 880 {
+                                    HStack(alignment: .center, spacing: 24) {
+                                        wheelCard
+                                            .frame(width: isGameActive ? gameSide : min(geometry.size.width * 0.55, 620))
+                                        if !isGameActive {
+                                            practicePanel
+                                                .frame(width: min(geometry.size.width * 0.33, 370))
+                                                .transition(.move(edge: .trailing).combined(with: .opacity))
+                                        }
+                                    }
+                                    .frame(maxWidth: 1180)
+                                } else {
+                                    VStack(spacing: 20) {
+                                        wheelCard
+                                            .frame(maxWidth: isGameActive ? gameSide : 560)
+                                        if !isGameActive {
+                                            practicePanel
+                                                .frame(maxWidth: 560)
+                                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                                        }
+                                    }
+                                }
+
+                            }
+                            .padding(.horizontal, horizontalPadding)
+                            .padding(.top, isGameActive ? 0 : 20)
+                            .padding(.bottom, isGameActive ? 0 : 34)
+                            .frame(maxWidth: .infinity, minHeight: isGameActive ? scrollGeometry.size.height : nil)
+                        }
+                        .scrollDisabled(isGameActive)
+                    }
                 }
             }
         }
         .preferredColorScheme(.dark)
-        .onDisappear { audio.stopAll() }
+        .onDisappear {
+            advanceTask?.cancel()
+            audio.stopAll()
+        }
+        .onChange(of: mode) {
+            resetGame()
+        }
         .alert("Add a feeling tag", isPresented: $isAddTagPresented) {
             TextField("e.g. wistful", text: $newFeelingTag)
             Button("Add", action: addFeelingTag)
@@ -161,25 +195,104 @@ struct ContentView: View {
             IntervalWheel(
                 selectedSemitones: mode == .explore ? selectedInterval.semitones : answer?.semitones,
                 revealedSemitones: mode == .guess && answer != nil ? challenge?.semitones : nil,
-                root: selectedRoot,
-                onSelect: chooseInterval,
-                onSelectRoot: selectRoot
-            )
+                onSelect: chooseInterval
+            ) { side in
+                if isGameActive {
+                    GameCenterBadge(
+                        side: side,
+                        root: selectedRoot,
+                        questionNumber: min(attempts.count + (answer == nil ? 1 : 0), roundLength),
+                        length: roundLength,
+                        challenge: challenge,
+                        answer: answer,
+                        streak: attempts.currentStreak,
+                        playCount: playCount,
+                        action: gameCenterTapped
+                    )
+                } else {
+                    RootNoteBadge(side: side, selectedRoot: selectedRoot, onSelect: selectRoot)
+                }
+            }
             .frame(maxWidth: .infinity)
             .aspectRatio(1, contentMode: .fit)
         }
         .padding(20)
         .background {
+            // The card chrome fades away during a round so the circle stands on its own.
             RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .fill(LinearGradient(colors: [Color(hex: 0x1B1D22), Color(hex: 0x15171B)], startPoint: .topLeading, endPoint: .bottomTrailing))
                 .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).stroke(Color.white.opacity(0.07), lineWidth: 1))
+                .shadow(color: .black.opacity(0.17), radius: 26, x: 0, y: 16)
+                .opacity(isGameActive ? 0 : 1)
         }
-        .shadow(color: .black.opacity(0.17), radius: 26, x: 0, y: 16)
+    }
+
+    private var gameHUD: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) {
+                quitButton
+                    .frame(width: 104, alignment: .leading)
+                Spacer(minLength: 0)
+                GameTrail(attempts: attempts, length: roundLength)
+                Spacer(minLength: 0)
+                gameScore
+                    .frame(width: 104, alignment: .trailing)
+            }
+
+            VStack(spacing: 14) {
+                HStack {
+                    quitButton
+                    Spacer()
+                    gameScore
+                }
+                GameTrail(attempts: attempts, length: roundLength)
+            }
+        }
+        .frame(maxWidth: 1180)
+    }
+
+    private var quitButton: some View {
+        Button(action: quitGame) {
+            HStack(spacing: 7) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                Text("Quit")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+            }
+            .foregroundStyle(Color.secondaryText)
+            .padding(.horizontal, 14)
+            .frame(height: 36)
+            .background(Color.panel, in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.07), lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.cancelAction)
+        .accessibilityLabel("Quit round")
+        .accessibilityHint("Ends this round without scoring it")
+    }
+
+    private var gameScore: some View {
+        HStack(spacing: 12) {
+            if attempts.currentStreak >= 2 {
+                Label("\(attempts.currentStreak)", systemImage: "flame.fill")
+                    .foregroundStyle(Color.streakTint)
+                    .transition(.scale.combined(with: .opacity))
+            }
+            Label("\(attempts.correctCount)", systemImage: "checkmark")
+                .foregroundStyle(Color.correctTint)
+                .contentTransition(.numericText())
+        }
+        .font(.system(size: 15, weight: .semibold, design: .rounded).monospacedDigit())
+        .labelStyle(.titleAndIcon)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: attempts.count)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(attempts.correctCount) correct, streak of \(attempts.currentStreak)")
     }
 
     private var practicePanel: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text(mode == .explore ? "Meet each interval" : "Name what you hear")
+            Text(mode == .explore ? "Meet each interval" : (gamePhase == .finished ? "Round complete" : "Name what you hear"))
                 .font(.system(size: 23, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color.primaryText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -198,7 +311,7 @@ struct ContentView: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
-            if mode == .guess && (challenge == nil || answer != nil) {
+            if mode == .guess {
                 primaryAction
             }
 
@@ -217,7 +330,7 @@ struct ContentView: View {
         }
         .shadow(color: .black.opacity(0.19), radius: 24, x: 0, y: 14)
         .animation(.spring(response: 0.34, dampingFraction: 0.86), value: mode)
-        .animation(.spring(response: 0.34, dampingFraction: 0.86), value: answer?.semitones)
+        .animation(.spring(response: 0.34, dampingFraction: 0.86), value: gamePhase)
     }
 
     private var modePicker: some View {
@@ -354,57 +467,122 @@ struct ContentView: View {
 
     private var guessDetails: some View {
         VStack(alignment: .leading, spacing: 15) {
-            HStack(spacing: 10) {
-                scoreTile(value: "\(correctCount)", label: "CORRECT", tint: Color(hex: 0x75E4C1))
-                scoreTile(value: "\(roundCount)", label: "ROUNDS", tint: Color(hex: 0xA29BFF))
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(answer == nil ? Color(hex: 0xA29BFF) : (answer?.semitones == challenge?.semitones ? Color(hex: 0x75E4C1) : Color(hex: 0xFF8A82)))
-                        .frame(width: 8, height: 8)
-                    Text(guessEyebrow)
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .tracking(1.3)
-                        .foregroundStyle(Color.mutedText)
+            if gamePhase == .finished {
+                HStack(spacing: 10) {
+                    scoreTile(value: "\(attempts.correctCount)/\(attempts.count)", label: "CORRECT", tint: .correctTint)
+                    scoreTile(value: "\(attempts.bestStreak)", label: "BEST STREAK", tint: .streakTint)
                 }
 
-                Text(guessTitle)
-                    .font(.system(size: 18, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.primaryText)
-                    .fixedSize(horizontal: false, vertical: true)
+                GameTrail(attempts: attempts, length: attempts.count)
+                    .padding(.horizontal, 2)
 
-                Text(guessSubtitle)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(Color.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
+                guessInfoCard(eyebrow: "HOW IT WENT", tint: resultsTint, title: resultsTitle, subtitle: resultsSubtitle)
+            } else {
+                guessInfoCard(
+                    eyebrow: "HOW IT PLAYS",
+                    tint: .accentTint,
+                    title: "\(roundLength) notes, one tap each",
+                    subtitle: "Each note sounds above \(selectedRoot.displayName). Tap its step on the circle and the next note follows on its own. Tap the center to hear it again."
+                )
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, minHeight: 90, alignment: .leading)
-            .background(Color(hex: 0x121417), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+            roundLengthPicker
         }
         .frame(minHeight: 198, alignment: .topLeading)
     }
 
-    private var guessEyebrow: String {
-        guard let challenge else { return "READY WHEN YOU ARE" }
-        guard let answer else { return "MYSTERY INTERVAL" }
-        return answer.semitones == challenge.semitones ? "THAT’S IT" : "NOT QUITE — TRY AGAIN NEXT ROUND"
+    private func guessInfoCard(eyebrow: String, tint: Color, title: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(tint)
+                    .frame(width: 8, height: 8)
+                Text(eyebrow)
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .tracking(1.3)
+                    .foregroundStyle(Color.mutedText)
+            }
+
+            Text(title)
+                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.primaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(subtitle)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(Color.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 90, alignment: .leading)
+        .background(Color(hex: 0x121417), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    private var guessTitle: String {
-        guard let challenge else { return "Start with a listening round" }
-        guard let answer else { return "Listen, then pick a point" }
-        return answer.semitones == challenge.semitones ? challenge.name : "It was the \(challenge.name.lowercased())"
+    private var roundLengthPicker: some View {
+        HStack(spacing: 10) {
+            Text("NOTES PER ROUND")
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .tracking(1.25)
+                .foregroundStyle(Color.mutedText)
+
+            Spacer(minLength: 4)
+
+            HStack(spacing: 3) {
+                ForEach([5, 10, 20], id: \.self) { length in
+                    Button {
+                        roundLength = length
+                    } label: {
+                        Text("\(length)")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
+                            .foregroundStyle(roundLength == length ? Color.primaryText : Color.secondaryText)
+                            .frame(width: 38, height: 28)
+                            .background {
+                                if roundLength == length {
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .fill(Color(hex: 0x34343E))
+                                }
+                            }
+                            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(length) notes per round")
+                    .accessibilityAddTraits(roundLength == length ? .isSelected : [])
+                }
+            }
+            .padding(3)
+            .background(Color(hex: 0x121417), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
     }
 
-    private var guessSubtitle: String {
-        guard let challenge else { return "One note will play. Identify its interval above \(selectedRoot.displayName)." }
-        guard let answer else { return "Use the colored steps to identify the sound." }
-        let tags = visibleFeelingTags(for: challenge).joined(separator: " · ")
-        let feelingCue = tags.isEmpty ? "" : " · \(tags)"
-        return "You chose \(answer.name.lowercased()). \(selectedRoot.displayName) → \(challenge.targetNote(for: selectedRoot)) · \(challenge.semitones) semitones\(feelingCue)"
+    private var resultsAccuracy: Double {
+        attempts.isEmpty ? 0 : Double(attempts.correctCount) / Double(attempts.count)
+    }
+
+    private var resultsTint: Color {
+        resultsAccuracy >= 0.8 ? .correctTint : (resultsAccuracy >= 0.5 ? .streakTint : .wrongTint)
+    }
+
+    private var resultsTitle: String {
+        switch resultsAccuracy {
+        case 1: "Flawless round"
+        case 0.8...: "Sharp ears"
+        case 0.5...: "Getting there"
+        default: "Keep listening"
+        }
+    }
+
+    private var resultsSubtitle: String {
+        let misses = Dictionary(grouping: attempts.filter { !$0.isCorrect }, by: \.target.semitones)
+        guard !misses.isEmpty else { return "Every note landed above \(selectedRoot.displayName)." }
+
+        let trickiest = misses
+            .sorted { $0.value.count != $1.value.count ? $0.value.count > $1.value.count : $0.key < $1.key }
+            .prefix(3)
+            .map { semitones, missed in
+                let name = IntervalInfo.semitones(semitones).name.lowercased()
+                return missed.count > 1 ? "\(name) (×\(missed.count))" : name
+            }
+        return "Trickiest: \(trickiest.joined(separator: ", ")). Try them in Explore, then go again."
     }
 
     private func visibleFeelingTags(for interval: IntervalInfo) -> [String] {
@@ -478,11 +656,11 @@ struct ContentView: View {
     }
 
     private var primaryAction: some View {
-        Button(action: beginRound) {
+        Button(action: startGame) {
             HStack(spacing: 10) {
-                Image(systemName: "shuffle")
+                Image(systemName: gamePhase == .finished ? "arrow.clockwise" : "play.fill")
                     .font(.system(size: 14, weight: .bold))
-                Text("Start a new round")
+                Text(gamePhase == .finished ? "Play again" : "Start round")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                 Spacer()
             }
@@ -493,7 +671,8 @@ struct ContentView: View {
             .shadow(color: Color(hex: 0x776DF0).opacity(0.2), radius: 14, x: 0, y: 7)
         }
         .buttonStyle(.plain)
-        .accessibilityHint("Starts a new round and plays one mystery note")
+        .keyboardShortcut(.defaultAction)
+        .accessibilityHint("Starts a round of \(roundLength) mystery notes")
     }
 
     private var droneControl: some View {
@@ -521,20 +700,97 @@ struct ContentView: View {
         if mode == .explore {
             selectedInterval = interval
             audio.playInterval(semitones: interval.semitones, rootFrequency: selectedRoot.frequency)
-        } else if let challenge, answer == nil {
-            answer = interval
-            roundCount += 1
-            if interval.semitones == challenge.semitones {
-                correctCount += 1
-            }
+        } else {
+            submitGuess(interval)
         }
     }
 
-    private func beginRound() {
+    private var isGameActive: Bool { mode == .guess && gamePhase == .playing }
+
+    private func startGame() {
+        advanceTask?.cancel()
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.86)) {
+            attempts = []
+            challenge = nil
+            answer = nil
+            gamePhase = .playing
+        }
+        // Give the layout a beat to settle before the first note sounds.
+        scheduleNextQuestion(after: .milliseconds(650))
+    }
+
+    private func submitGuess(_ interval: IntervalInfo) {
+        guard isGameActive, let challenge, answer == nil else { return }
+        let attempt = GuessAttempt(id: attempts.count, target: challenge, guess: interval)
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            answer = interval
+            attempts.append(attempt)
+        }
+        // Misses linger longer so the right answer has time to register.
+        scheduleNextQuestion(after: attempt.isCorrect ? .milliseconds(850) : .milliseconds(2000))
+    }
+
+    private func nextQuestion() {
+        advanceTask?.cancel()
+        guard isGameActive else { return }
+        guard attempts.count < roundLength else {
+            finishGame()
+            return
+        }
+
         let candidates = IntervalInfo.all.filter { $0.semitones != challenge?.semitones }
-        challenge = candidates.randomElement() ?? IntervalInfo.semitones(7)
+        let next = candidates.randomElement() ?? IntervalInfo.semitones(7)
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            challenge = next
+            answer = nil
+        }
+        playChallenge()
+    }
+
+    private func scheduleNextQuestion(after delay: Duration) {
+        advanceTask?.cancel()
+        advanceTask = Task {
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            nextQuestion()
+        }
+    }
+
+    private func playChallenge() {
+        guard let challenge else { return }
+        playCount += 1
+        audio.playInterval(semitones: challenge.semitones, rootFrequency: selectedRoot.frequency)
+    }
+
+    private func gameCenterTapped() {
+        if answer != nil {
+            nextQuestion()
+        } else {
+            playChallenge()
+        }
+    }
+
+    private func finishGame() {
+        advanceTask?.cancel()
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.86)) {
+            challenge = nil
+            answer = nil
+            gamePhase = .finished
+        }
+    }
+
+    private func quitGame() {
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.86)) {
+            resetGame()
+        }
+    }
+
+    private func resetGame() {
+        advanceTask?.cancel()
+        attempts = []
+        challenge = nil
         answer = nil
-        audio.playInterval(semitones: challenge?.semitones ?? 7, rootFrequency: selectedRoot.frequency)
+        gamePhase = .setup
     }
 
     private func selectRoot(_ root: RootNote) {
@@ -544,12 +800,11 @@ struct ContentView: View {
     }
 }
 
-private struct IntervalWheel: View {
+private struct IntervalWheel<Center: View>: View {
     let selectedSemitones: Int?
     let revealedSemitones: Int?
-    let root: RootNote
     let onSelect: (IntervalInfo) -> Void
-    let onSelectRoot: (RootNote) -> Void
+    @ViewBuilder let centerContent: (_ side: CGFloat) -> Center
 
     var body: some View {
         GeometryReader { geometry in
@@ -569,15 +824,17 @@ private struct IntervalWheel: View {
                     .fill(RadialGradient(colors: [Color(hex: 0x272833).opacity(0.8), Color(hex: 0x191B20).opacity(0.24)], center: .center, startRadius: 6, endRadius: side * 0.26))
                     .frame(width: side * 0.48, height: side * 0.48)
 
-                rootBadge(side: side, selectedRoot: root, onSelect: onSelectRoot)
+                centerContent(side)
 
                 ForEach(IntervalInfo.all) { interval in
                     let radians = Double(interval.wheelPosition) * Double.pi / 6 - Double.pi / 2
                     let labelRadius = side * 0.29
+                    let ring = ringColor(for: interval)
                     IntervalWheelNode(
                         interval: interval,
                         isSelected: selectedSemitones == interval.semitones,
-                        isRevealedTarget: revealedSemitones == interval.semitones && selectedSemitones != interval.semitones,
+                        ringColor: ring,
+                        isDimmed: revealedSemitones != nil && ring == nil,
                         radialAngle: radians,
                         markerOffset: side * 0.10,
                         action: { onSelect(interval) }
@@ -595,7 +852,21 @@ private struct IntervalWheel: View {
         .accessibilityLabel("Interval circle. Select one of twelve semitone steps.")
     }
 
-    private func rootBadge(side: CGFloat, selectedRoot: RootNote, onSelect: @escaping (RootNote) -> Void) -> some View {
+    /// Once an answer is revealed, the right step glows green and a wrong pick glows red.
+    private func ringColor(for interval: IntervalInfo) -> Color? {
+        guard let revealedSemitones else { return nil }
+        if interval.semitones == revealedSemitones { return .correctTint }
+        if interval.semitones == selectedSemitones { return .wrongTint }
+        return nil
+    }
+}
+
+private struct RootNoteBadge: View {
+    let side: CGFloat
+    let selectedRoot: RootNote
+    let onSelect: (RootNote) -> Void
+
+    var body: some View {
         Menu {
             Section("Root note · octave 3") {
                 ForEach(RootNote.all) { note in
@@ -646,7 +917,8 @@ private struct IntervalWheel: View {
 private struct IntervalWheelNode: View {
     let interval: IntervalInfo
     let isSelected: Bool
-    let isRevealedTarget: Bool
+    let ringColor: Color?
+    let isDimmed: Bool
     let radialAngle: Double
     let markerOffset: CGFloat
     let action: () -> Void
@@ -654,11 +926,12 @@ private struct IntervalWheelNode: View {
     var body: some View {
         Button(action: action) {
             ZStack {
-                if isRevealedTarget {
+                if let ringColor {
                     Circle()
-                        .stroke(Color(hex: 0x75E4C1).opacity(0.95), lineWidth: 1.5)
-                        .frame(width: 58, height: 58)
-                        .shadow(color: Color(hex: 0x75E4C1).opacity(0.4), radius: 8)
+                        .stroke(ringColor.opacity(0.95), lineWidth: 2)
+                        .frame(width: 60, height: 60)
+                        .shadow(color: ringColor.opacity(0.5), radius: 10)
+                        .transition(.scale(scale: 0.7).combined(with: .opacity))
                 }
 
                 Circle()
@@ -679,9 +952,13 @@ private struct IntervalWheelNode: View {
                     .offset(x: cos(radialAngle) * Double(markerOffset), y: sin(radialAngle) * Double(markerOffset))
             }
             .frame(width: 54, height: 54)
+            .scaleEffect(ringColor == nil ? 1 : 1.1)
+            .opacity(isDimmed ? 0.4 : 1)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: ringColor == nil)
+        .animation(.easeInOut(duration: 0.2), value: isDimmed)
         .accessibilityLabel("\(interval.name), \(interval.semitones) semitones")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
@@ -891,7 +1168,7 @@ private final class IntervalAudio: ObservableObject {
     }
 }
 
-private extension Color {
+extension Color {
     static let canvas = Color(hex: 0x111316)
     static let panel = Color(hex: 0x1C1F24)
     static let primaryText = Color(hex: 0xF4F3F7)
