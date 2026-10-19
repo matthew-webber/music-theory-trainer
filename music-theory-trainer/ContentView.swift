@@ -8,6 +8,11 @@ private enum PracticeMode: String, CaseIterable {
 struct RootNote: Identifiable, Equatable {
     static let homeOctave = 3
     static let octaveRange = 1...5
+    static let droneOctaveRange = 2...5
+
+    static func octaveShiftLabel(_ shift: Int) -> String {
+        shift == 0 ? "0" : (shift > 0 ? "+\(shift)" : "−\(-shift)")
+    }
 
     let pitchClass: Int
     let name: String
@@ -79,6 +84,7 @@ struct ContentView: View {
     @State private var selectedInterval = IntervalInfo.semitones(7)
     @State private var selectedRoot = RootNote.all[0]
     @AppStorage("timbre") private var timbre: Timbre = .warm
+    @AppStorage("droneOctave") private var droneOctave = RootNote.homeOctave
     @State private var gamePhase: GamePhase = .setup
     @State private var roundLength = 10
     @State private var challenge: IntervalInfo?
@@ -169,6 +175,9 @@ struct ContentView: View {
         .onChange(of: mode) {
             resetGame()
         }
+        .onChange(of: droneFrequency) {
+            audio.updateDrone(rootFrequency: droneFrequency)
+        }
         .onChange(of: timbre) {
             audio.playRootNote(frequency: selectedRoot.frequency, timbre: timbre)
         }
@@ -181,7 +190,7 @@ struct ContentView: View {
             Text("Add a personal cue for \(selectedInterval.name.lowercased()).")
         }
         .sheet(isPresented: $isSettingsPresented) {
-            FeelingSettingsSheet(onRestoreDefaults: restoreDefaultFeelingTags)
+            SettingsSheet(onRestoreDefaults: restoreDefaultFeelingTags)
         }
     }
 
@@ -220,7 +229,7 @@ struct ContentView: View {
 
     private var octaveIndicator: some View {
         let shift = selectedRoot.octave - RootNote.homeOctave
-        return Text(shift == 0 ? "0" : (shift > 0 ? "+\(shift)" : "−\(-shift)"))
+        return Text(RootNote.octaveShiftLabel(shift))
             .font(.system(size: 13, weight: .semibold, design: .rounded).monospacedDigit())
             .foregroundStyle(shift == 0 ? Color.mutedText.opacity(0.7) : Color.accentTint.opacity(0.9))
             .contentTransition(.numericText(value: Double(shift)))
@@ -730,7 +739,7 @@ struct ContentView: View {
     private func droneToggle(compact: Bool) -> some View {
         let isOn = Binding(
             get: { audio.isDronePlaying },
-            set: { audio.setDrone($0, rootFrequency: selectedRoot.frequency) }
+            set: { audio.setDrone($0, rootFrequency: droneFrequency) }
         )
         let icon = Image(systemName: "waveform")
             .symbolEffect(.variableColor.iterative, options: .repeating, isActive: audio.isDronePlaying)
@@ -905,7 +914,11 @@ struct ContentView: View {
     private func selectRoot(_ root: RootNote) {
         selectedRoot = root
         audio.playRootNote(frequency: root.frequency, timbre: timbre)
-        audio.updateDrone(rootFrequency: root.frequency)
+    }
+
+    /// The drone follows the root's pitch class but keeps its own octave, independent of the arrow keys.
+    private var droneFrequency: Double {
+        selectedRoot.inOctave(droneOctave).frequency
     }
 
     private func shiftOctave(by delta: Int) {
@@ -1140,8 +1153,9 @@ private struct ChipToggleStyle: ToggleStyle {
     }
 }
 
-private struct FeelingSettingsSheet: View {
+private struct SettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("droneOctave") private var droneOctave = RootNote.homeOctave
     @State private var didRestoreDefaults = false
     let onRestoreDefaults: () -> Void
 
@@ -1161,28 +1175,55 @@ private struct FeelingSettingsSheet: View {
                 .fill(Color.white.opacity(0.08))
                 .frame(height: 1)
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Feeling tags")
+            HStack(alignment: .center, spacing: 16) {
+                Text("Drone octave")
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                     .foregroundStyle(Color.primaryText)
-                Text("Restore the original tags removed from interval cards. Your personal tags stay.")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(Color.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
 
-                Button {
-                    onRestoreDefaults()
-                    didRestoreDefaults = true
-                } label: {
-                    Label("Restore original tags", systemImage: "arrow.counterclockwise")
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Color.primaryText)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 11)
-                        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                Spacer(minLength: 0)
+
+                HStack(spacing: 4) {
+                    octaveStepButton(systemImage: "minus", delta: -1, label: "Lower drone octave")
+                    Text(RootNote.octaveShiftLabel(droneOctave - RootNote.homeOctave))
+                        .font(.system(size: 15, weight: .semibold, design: .rounded).monospacedDigit())
+                        .foregroundStyle(droneOctave == RootNote.homeOctave ? Color.secondaryText : Color.droneTint)
+                        .contentTransition(.numericText(value: Double(droneOctave)))
+                        .frame(width: 34)
+                        .accessibilityLabel("Drone octave \(RootNote.octaveShiftLabel(droneOctave - RootNote.homeOctave))")
+                    octaveStepButton(systemImage: "plus", delta: 1, label: "Raise drone octave")
                 }
-                .buttonStyle(.plain)
-                .padding(.top, 3)
+                .padding(4)
+                .background(Color(hex: 0x121417), in: Capsule())
+                .animation(.spring(response: 0.3, dampingFraction: 0.8), value: droneOctave)
+            }
+
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(height: 1)
+
+            VStack(alignment: .trailing, spacing: 8) {
+                HStack(alignment: .center, spacing: 16) {
+                    Text("Feeling tags")
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.primaryText)
+
+                    Spacer(minLength: 0)
+
+                    Button {
+                        onRestoreDefaults()
+                        didRestoreDefaults = true
+                    } label: {
+                        Label("Restore original tags", systemImage: "arrow.counterclockwise")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color.primaryText)
+                            .padding(.horizontal, 14)
+                            .frame(height: 38)
+                            .background(Color.white.opacity(0.07), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .focusEffectDisabled()
+                    .accessibilityHint("Brings back default tags you removed. Your own tags stay.")
+                }
 
                 if didRestoreDefaults {
                     Text("Original tags restored.")
@@ -1194,8 +1235,27 @@ private struct FeelingSettingsSheet: View {
             Spacer(minLength: 0)
         }
         .padding(24)
-        .frame(maxWidth: 460, minHeight: 270, alignment: .topLeading)
+        .frame(maxWidth: 460, minHeight: 230, alignment: .topLeading)
         .background(Color.canvas)
+    }
+
+    private func octaveStepButton(systemImage: String, delta: Int, label: String) -> some View {
+        let target = droneOctave + delta
+        let isEnabled = RootNote.droneOctaveRange.contains(target)
+        return Button {
+            droneOctave = target
+        } label: {
+            Image(systemName: systemImage)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(isEnabled ? Color.primaryText : Color.mutedText.opacity(0.5))
+                .frame(width: 30, height: 30)
+                .background(Color.white.opacity(isEnabled ? 0.07 : 0.03), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .disabled(!isEnabled)
+        .accessibilityLabel(label)
     }
 }
 
