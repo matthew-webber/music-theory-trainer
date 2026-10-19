@@ -106,6 +106,8 @@ struct GameCenterBadge: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
+        .focusable(false)
+        .focusEffectDisabled()
         .keyboardShortcut(.space, modifiers: [])
         .animation(.spring(response: 0.32, dampingFraction: 0.78), value: isCorrect)
         .accessibilityLabel(accessibilityText)

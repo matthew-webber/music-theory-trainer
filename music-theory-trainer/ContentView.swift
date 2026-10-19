@@ -1,5 +1,3 @@
-import AVFoundation
-import Combine
 import SwiftUI
 
 private enum PracticeMode: String, CaseIterable {
@@ -8,13 +6,23 @@ private enum PracticeMode: String, CaseIterable {
 }
 
 struct RootNote: Identifiable, Equatable {
+    static let homeOctave = 3
+    static let octaveRange = 1...5
+
     let pitchClass: Int
     let name: String
+    var octave = homeOctave
 
     var id: Int { pitchClass }
-    var midiNote: Int { 48 + pitchClass }
-    var frequency: Double { 130.8128 * pow(2, Double(pitchClass) / 12) }
-    var displayName: String { "\(name)3" }
+    var midiNote: Int { 12 * (octave + 1) + pitchClass }
+    var frequency: Double { 130.8128 * pow(2, Double(pitchClass) / 12 + Double(octave - Self.homeOctave)) }
+    var displayName: String { "\(name)\(octave)" }
+
+    func inOctave(_ octave: Int) -> RootNote {
+        var note = self
+        note.octave = octave
+        return note
+    }
 
     static let all: [RootNote] = [
         .init(pitchClass: 0, name: "C"), .init(pitchClass: 1, name: "C♯"),
@@ -70,6 +78,7 @@ struct ContentView: View {
     @State private var mode: PracticeMode = .explore
     @State private var selectedInterval = IntervalInfo.semitones(7)
     @State private var selectedRoot = RootNote.all[0]
+    @AppStorage("timbre") private var timbre: Timbre = .warm
     @State private var gamePhase: GamePhase = .setup
     @State private var roundLength = 10
     @State private var challenge: IntervalInfo?
@@ -95,6 +104,8 @@ struct ContentView: View {
                     endRadius: 780
                 )
                 .ignoresSafeArea()
+
+                octaveShortcuts
 
                 let horizontalPadding: CGFloat = geometry.size.width < 520 ? 16 : 28
 
@@ -158,6 +169,9 @@ struct ContentView: View {
         .onChange(of: mode) {
             resetGame()
         }
+        .onChange(of: timbre) {
+            audio.playRootNote(frequency: selectedRoot.frequency, timbre: timbre)
+        }
         .alert("Add a feeling tag", isPresented: $isAddTagPresented) {
             TextField("e.g. wistful", text: $newFeelingTag)
             Button("Add", action: addFeelingTag)
@@ -188,6 +202,31 @@ struct ContentView: View {
             .accessibilityLabel("Settings")
         }
         .frame(maxWidth: 1180)
+    }
+
+    /// Invisible buttons that give the up and down arrow keys octave control from anywhere in the window.
+    private var octaveShortcuts: some View {
+        ZStack {
+            Button("Octave up") { shiftOctave(by: 1) }
+                .keyboardShortcut(.upArrow, modifiers: [])
+            Button("Octave down") { shiftOctave(by: -1) }
+                .keyboardShortcut(.downArrow, modifiers: [])
+        }
+        .buttonStyle(.plain)
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
+    }
+
+    private var octaveIndicator: some View {
+        let shift = selectedRoot.octave - RootNote.homeOctave
+        return Text(shift == 0 ? "0" : (shift > 0 ? "+\(shift)" : "−\(-shift)"))
+            .font(.system(size: 13, weight: .semibold, design: .rounded).monospacedDigit())
+            .foregroundStyle(shift == 0 ? Color.mutedText.opacity(0.7) : Color.accentTint.opacity(0.9))
+            .contentTransition(.numericText(value: Double(shift)))
+            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: shift)
+            .padding(16)
+            .accessibilityLabel("Octave \(selectedRoot.octave)")
     }
 
     private var wheelCard: some View {
@@ -225,23 +264,28 @@ struct ContentView: View {
                 .shadow(color: .black.opacity(0.17), radius: 26, x: 0, y: 16)
                 .opacity(isGameActive ? 0 : 1)
         }
+        .overlay(alignment: .topTrailing) { octaveIndicator }
     }
 
     private var gameHUD: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 16) {
-                quitButton
-                    .frame(width: 104, alignment: .leading)
+                HStack(spacing: 8) {
+                    quitButton
+                    droneToggle(compact: true)
+                }
+                .frame(width: 190, alignment: .leading)
                 Spacer(minLength: 0)
                 GameTrail(attempts: attempts, length: roundLength)
                 Spacer(minLength: 0)
                 gameScore
-                    .frame(width: 104, alignment: .trailing)
+                    .frame(width: 190, alignment: .trailing)
             }
 
             VStack(spacing: 14) {
-                HStack {
+                HStack(spacing: 8) {
                     quitButton
+                    droneToggle(compact: true)
                     Spacer()
                     gameScore
                 }
@@ -319,7 +363,7 @@ struct ContentView: View {
                 .fill(Color.white.opacity(0.08))
                 .frame(height: 1)
 
-            droneControl
+            soundControls
         }
         .padding(24)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -675,31 +719,96 @@ struct ContentView: View {
         .accessibilityHint("Starts a round of \(roundLength) mystery notes")
     }
 
-    private var droneControl: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading) {
-                Text("\(selectedRoot.name) drone")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.primaryText)
+    private var soundControls: some View {
+        VStack(spacing: 12) {
+            droneToggle(compact: false)
+            toneControl
+        }
+        .padding(.top, 1)
+    }
+
+    private func droneToggle(compact: Bool) -> some View {
+        let isOn = Binding(
+            get: { audio.isDronePlaying },
+            set: { audio.setDrone($0, rootFrequency: selectedRoot.frequency) }
+        )
+        let icon = Image(systemName: "waveform")
+            .symbolEffect(.variableColor.iterative, options: .repeating, isActive: audio.isDronePlaying)
+
+        return Group {
+            if compact {
+                Toggle(isOn: isOn) {
+                    HStack(spacing: 7) {
+                        icon.font(.system(size: 11, weight: .bold))
+                        Text("Drone")
+                    }
+                }
+                .toggleStyle(ChipToggleStyle(tint: .droneTint))
+            } else {
+                Toggle(isOn: isOn) {
+                    HStack(spacing: 10) {
+                        icon
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(audio.isDronePlaying ? Color.droneTint : Color.secondaryText)
+                            .frame(width: 30, height: 30)
+                            .background((audio.isDronePlaying ? Color.droneTint.opacity(0.12) : Color.white.opacity(0.05)), in: Circle())
+                        Text("\(selectedRoot.name) drone")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color.primaryText)
+                    }
+                }
+                .toggleStyle(PillSwitchToggleStyle(tint: .droneTint))
             }
+        }
+        .accessibilityLabel("\(selectedRoot.name) drone")
+    }
+
+    private var toneControl: some View {
+        HStack(spacing: 10) {
+            Image(systemName: timbre.symbolName)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.secondaryText)
+                .frame(width: 30, height: 30)
+                .background(Color.white.opacity(0.05), in: Circle())
+                .contentTransition(.symbolEffect(.replace))
+            Text("Tone")
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.primaryText)
 
             Spacer(minLength: 4)
 
-            Toggle("Drone", isOn: Binding(
-                get: { audio.isDronePlaying },
-                set: { audio.setDrone($0, rootFrequency: selectedRoot.frequency) }
-            ))
-            .labelsHidden()
-            .tint(Color(hex: 0x64DDB8))
-            .accessibilityLabel("\(selectedRoot.name) drone")
+            Menu {
+                Picker("Tone", selection: $timbre) {
+                    ForEach(Timbre.allCases) { item in
+                        Label(item.rawValue, systemImage: item.symbolName).tag(item)
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                HStack(spacing: 6) {
+                    Text(timbre.rawValue)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .foregroundStyle(Color.primaryText)
+                .padding(.horizontal, 12)
+                .frame(height: 30)
+                .background(Color(hex: 0x121417), in: Capsule())
+                .overlay(Capsule().stroke(Color.white.opacity(0.07), lineWidth: 1))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .buttonStyle(.plain)
+            .fixedSize()
+            .accessibilityLabel("Tone, \(timbre.rawValue)")
         }
-        .padding(.top, 1)
     }
 
     private func chooseInterval(_ interval: IntervalInfo) {
         if mode == .explore {
             selectedInterval = interval
-            audio.playInterval(semitones: interval.semitones, rootFrequency: selectedRoot.frequency)
+            audio.playInterval(semitones: interval.semitones, rootFrequency: selectedRoot.frequency, timbre: timbre)
         } else {
             submitGuess(interval)
         }
@@ -759,7 +868,7 @@ struct ContentView: View {
     private func playChallenge() {
         guard let challenge else { return }
         playCount += 1
-        audio.playInterval(semitones: challenge.semitones, rootFrequency: selectedRoot.frequency)
+        audio.playInterval(semitones: challenge.semitones, rootFrequency: selectedRoot.frequency, timbre: timbre)
     }
 
     private func gameCenterTapped() {
@@ -795,8 +904,14 @@ struct ContentView: View {
 
     private func selectRoot(_ root: RootNote) {
         selectedRoot = root
-        audio.playRootNote(frequency: root.frequency)
+        audio.playRootNote(frequency: root.frequency, timbre: timbre)
         audio.updateDrone(rootFrequency: root.frequency)
+    }
+
+    private func shiftOctave(by delta: Int) {
+        let octave = selectedRoot.octave + delta
+        guard RootNote.octaveRange.contains(octave) else { return }
+        selectRoot(selectedRoot.inOctave(octave))
     }
 }
 
@@ -868,8 +983,8 @@ private struct RootNoteBadge: View {
 
     var body: some View {
         Menu {
-            Section("Root note · octave 3") {
-                ForEach(RootNote.all) { note in
+            Section("Root note · octave \(selectedRoot.octave)") {
+                ForEach(RootNote.all.map { $0.inOctave(selectedRoot.octave) }) { note in
                     Button {
                         onSelect(note)
                     } label: {
@@ -957,10 +1072,71 @@ private struct IntervalWheelNode: View {
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
+        // Steps are tapped, not tabbed to; a keyboard focus ring here reads as a selection.
+        .focusable(false)
+        .focusEffectDisabled()
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: ringColor == nil)
         .animation(.easeInOut(duration: 0.2), value: isDimmed)
         .accessibilityLabel("\(interval.name), \(interval.semitones) semitones")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+/// A full-width row with a sliding switch on the trailing edge.
+private struct PillSwitchToggleStyle: ToggleStyle {
+    let tint: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: 12) {
+                configuration.label
+                Spacer(minLength: 4)
+                Capsule()
+                    .fill(configuration.isOn ? tint.opacity(0.9) : Color.white.opacity(0.1))
+                    .overlay(Capsule().stroke(Color.white.opacity(configuration.isOn ? 0 : 0.08), lineWidth: 1))
+                    .frame(width: 42, height: 24)
+                    .overlay(alignment: configuration.isOn ? .trailing : .leading) {
+                        Circle()
+                            .fill(configuration.isOn ? Color.white : Color(hex: 0xC9CAD2))
+                            .padding(3)
+                            .shadow(color: .black.opacity(0.25), radius: 2, x: 0, y: 1)
+                    }
+                    .shadow(color: tint.opacity(configuration.isOn ? 0.3 : 0), radius: 8)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .animation(.spring(response: 0.28, dampingFraction: 0.75), value: configuration.isOn)
+        .accessibilityAddTraits(.isToggle)
+        .accessibilityValue(configuration.isOn ? "On" : "Off")
+    }
+}
+
+/// A compact capsule that lights up while on, sized to sit beside other HUD buttons.
+private struct ChipToggleStyle: ToggleStyle {
+    let tint: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            configuration.label
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(configuration.isOn ? tint : Color.secondaryText)
+                .padding(.horizontal, 14)
+                .frame(height: 36)
+                .background(configuration.isOn ? tint.opacity(0.13) : Color.panel, in: Capsule())
+                .overlay(Capsule().stroke(configuration.isOn ? tint.opacity(0.4) : Color.white.opacity(0.07), lineWidth: 1))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .animation(.easeInOut(duration: 0.2), value: configuration.isOn)
+        .accessibilityAddTraits(.isToggle)
+        .accessibilityValue(configuration.isOn ? "On" : "Off")
     }
 }
 
@@ -1023,157 +1199,13 @@ private struct FeelingSettingsSheet: View {
     }
 }
 
-@MainActor
-private final class IntervalAudio: ObservableObject {
-    @Published private(set) var isDronePlaying = false
-
-    private let engine = AVAudioEngine()
-    private let dronePlayer = AVAudioPlayerNode()
-    private let intervalPlayer = AVAudioPlayerNode()
-    private let sampleRate = 44_100.0
-    private var isConfigured = false
-
-    func setDrone(_ enabled: Bool, rootFrequency: Double) {
-        if enabled {
-            guard startEngine() else { return }
-            dronePlayer.stop()
-            dronePlayer.scheduleBuffer(makeDroneBuffer(rootFrequency: rootFrequency), at: nil, options: .loops, completionHandler: nil)
-            dronePlayer.play()
-            isDronePlaying = true
-        } else {
-            dronePlayer.stop()
-            isDronePlaying = false
-        }
-    }
-
-    func updateDrone(rootFrequency: Double) {
-        guard isDronePlaying else { return }
-        setDrone(true, rootFrequency: rootFrequency)
-    }
-
-    func playRootNote(frequency: Double) {
-        guard startEngine() else { return }
-        intervalPlayer.stop()
-        intervalPlayer.scheduleBuffer(makeNoteBuffer(frequency: frequency), at: nil, options: [], completionHandler: nil)
-        intervalPlayer.play()
-    }
-
-    func playInterval(semitones: Int, rootFrequency: Double) {
-        guard startEngine() else { return }
-        intervalPlayer.stop()
-        intervalPlayer.scheduleBuffer(makeIntervalBuffer(semitones: semitones, rootFrequency: rootFrequency), at: nil, options: [], completionHandler: nil)
-        intervalPlayer.play()
-    }
-
-    func stopAll() {
-        dronePlayer.stop()
-        intervalPlayer.stop()
-        if engine.isRunning { engine.stop() }
-        isDronePlaying = false
-    }
-
-    private func startEngine() -> Bool {
-        #if os(iOS)
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
-        try? AVAudioSession.sharedInstance().setActive(true)
-        #endif
-
-        if !isConfigured {
-            engine.attach(dronePlayer)
-            engine.attach(intervalPlayer)
-            engine.connect(dronePlayer, to: engine.mainMixerNode, format: audioFormat)
-            engine.connect(intervalPlayer, to: engine.mainMixerNode, format: audioFormat)
-            engine.prepare()
-            isConfigured = true
-        }
-
-        if !engine.isRunning {
-            do {
-                try engine.start()
-            } catch {
-                return false
-            }
-        }
-        return true
-    }
-
-    private var audioFormat: AVAudioFormat {
-        AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
-    }
-
-    private func makeDroneBuffer(rootFrequency: Double) -> AVAudioPCMBuffer {
-        // The loop is sized to an integer number of cycles at the selected root's lower octave.
-        let fundamental = rootFrequency / 2
-        let frameCount = AVAudioFrameCount((sampleRate / fundamental * 64).rounded())
-        let buffer = AVAudioPCMBuffer(pcmFormat: audioFormat, frameCapacity: frameCount)!
-        buffer.frameLength = frameCount
-        guard let channels = buffer.floatChannelData else { return buffer }
-
-        for frame in 0..<Int(frameCount) {
-            let t = Double(frame) / sampleRate
-            let swell = 0.9 + 0.1 * sin(2 * Double.pi * 4 * Double(frame) / Double(frameCount))
-            let bass = warmTone(frequency: fundamental, time: t)
-            let root = warmTone(frequency: fundamental * 2, time: t) * 0.52
-            let fifth = warmTone(frequency: fundamental * 3, time: t) * 0.34
-            let octave = warmTone(frequency: fundamental * 4, time: t) * 0.18
-            let value = Float((bass + root + fifth + octave) * 0.075 * swell)
-            channels[0][frame] = value
-            channels[1][frame] = value * 0.96
-        }
-        return buffer
-    }
-
-    private func makeNoteBuffer(frequency: Double) -> AVAudioPCMBuffer {
-        let duration = 1.05
-        let frameCount = AVAudioFrameCount(sampleRate * duration)
-        let buffer = AVAudioPCMBuffer(pcmFormat: audioFormat, frameCapacity: frameCount)!
-        buffer.frameLength = frameCount
-        guard let channels = buffer.floatChannelData else { return buffer }
-
-        for frame in 0..<Int(frameCount) {
-            let t = Double(frame) / sampleRate
-            let attack = min(1, t / 0.025)
-            let release = min(1, (duration - t) / 0.22)
-            let value = Float(warmTone(frequency: frequency, time: t) * 0.25 * max(0, min(attack, release)))
-            channels[0][frame] = value
-            channels[1][frame] = value
-        }
-        return buffer
-    }
-
-    private func makeIntervalBuffer(semitones: Int, rootFrequency: Double) -> AVAudioPCMBuffer {
-        let duration = 2.15
-        let frameCount = AVAudioFrameCount(sampleRate * duration)
-        let buffer = AVAudioPCMBuffer(pcmFormat: audioFormat, frameCapacity: frameCount)!
-        buffer.frameLength = frameCount
-        guard let channels = buffer.floatChannelData else { return buffer }
-
-        let targetFrequency = rootFrequency * pow(2, Double(semitones) / 12)
-        for frame in 0..<Int(frameCount) {
-            let t = Double(frame) / sampleRate
-            let attack = min(1, t / 0.035)
-            let release = min(1, (duration - t) / 0.28)
-            let envelope = max(0, min(attack, release))
-            let target = warmTone(frequency: targetFrequency, time: t)
-            let value = Float(target * 0.25 * envelope)
-            channels[0][frame] = value
-            channels[1][frame] = value
-        }
-        return buffer
-    }
-
-    private func warmTone(frequency: Double, time: Double) -> Double {
-        let phase = 2 * Double.pi * frequency * time
-        return sin(phase) + 0.18 * sin(phase * 2) + 0.055 * sin(phase * 3)
-    }
-}
-
 extension Color {
     static let canvas = Color(hex: 0x111316)
     static let panel = Color(hex: 0x1C1F24)
     static let primaryText = Color(hex: 0xF4F3F7)
     static let secondaryText = Color(hex: 0xA8A9B3)
     static let mutedText = Color(hex: 0x70727D)
+    static let droneTint = Color(hex: 0x64DDB8)
 
     init(hex: UInt) {
         self.init(
