@@ -208,6 +208,10 @@ struct ContentView: View {
                     .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(Color.white.opacity(0.07), lineWidth: 1))
             }
             .buttonStyle(.plain)
+            // Otherwise the gear takes first focus at launch and shows a ring before anything is pressed.
+            .focusable(false)
+            .focusEffectDisabled()
+            .keyboardShortcut(",", modifiers: .command)
             .accessibilityLabel("Settings")
         }
         .frame(maxWidth: 1180)
